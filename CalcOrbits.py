@@ -5,7 +5,8 @@ import time
 import os
 import string
 import random
-
+import zarr
+from numcodecs import LZ4, Blosc
 import numpy as np
 
 # ----------------------------------------------------
@@ -44,7 +45,7 @@ R_dis = AS_radius * (2. * NS_mass / AS_mass)**(1. / 3.)    # [km]
 Rdrop = 1e4
 Rsave = 1e3    # radius [km] within in which orbits are written to file
 nwrite = 100    # number of steps in output to skip when writing to file
-mem_size = 1.    # target size of memory [GB] the calculation fills
+mem_size = 5.    # target size of memory [GB] the calculation fills
 
 # ----------------------------------------------------
 # functions
@@ -148,20 +149,16 @@ def write_general_info():
     fo.close()
 
 
-def write_pointParticle_orbit(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t):
+def write_pointParticle_orbit_zarr(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t):
     """ write axion star to file """
-    fo = open(fpath_out + '/AS_pointParticle_orbit.txt', 'w')
-    fo.write('# t[s]  x[km]  y[km]  z[km]  vx[km]  vy[km]  vz[km]\n')
-    for i in range(len(AS_x)):
-        fo.write('{:.12E}  '.format(t[i]))
-        fo.write('{:.6E}  '.format(AS_x[i]))
-        fo.write('{:.6E}  '.format(AS_y[i]))
-        fo.write('{:.6E}  '.format(AS_z[i]))
-        fo.write('{:.6E}  '.format(AS_vx[i]))
-        fo.write('{:.6E}  '.format(AS_vy[i]))
-        fo.write('{:.6E}'.format(AS_vz[i]))
-        fo.write('\n')
-    fo.close()
+    fo = zarr.open(fpath_out + '/AS_pointParticle_orbit.zarr', 'w')
+    fo.array("t", t)
+    fo.array("AS_x", AS_x)
+    fo.array("AS_y", AS_y)
+    fo.array("AS_z", AS_z)
+    fo.array("AS_vx", AS_vx)
+    fo.array("AS_vy", AS_vy)
+    fo.array("AS_vz", AS_vz)
 
 
 def find_nsteps(Np, target_size=mem_size):
@@ -222,17 +219,24 @@ def write_orbits_to_disk(x,
     """ appends the orbit files of particles in inds_active with the results 
        only every nskip-th timestep is written to file"""
     startTfun = time.time()
+    t = np.array(t[::nskip]).T
+    x = np.array(x[::nskip]).T
+    y = np.array(y[::nskip]).T
+    z = np.array(z[::nskip]).T
+    vx = np.array(vx[::nskip]).T
+    vy = np.array(vy[::nskip]).T
+    vz = np.array(vz[::nskip]).T
+
     for i in range(len(inds_active)):
-        fo = open(fout_orbit_names[inds_active[i]], 'a')
-        j = 0
-        while j < len(t) - 1:
-            if (x[j][i]**2. + y[j][i]**2. + z[j][i]**2.) < Rcut**2.:
-                fo.write(
-                    '{:.12E}  {:.6E}  {:.6E}  {:.6E}  {:.6E}  {:.6E}  {:.6E}\n'
-                    .format(t[j][i], x[j][i], y[j][i], z[j][i], vx[j][i],
-                            vy[j][i], vz[j][i]))
-            j += nskip
-        fo.close()
+        mask = x[i]**2 + y[i]**2 + z[i]**2 < Rcut**2
+
+        out_zarr[str(i)].append([t[i][mask],
+                                 x[i][mask],
+                                 y[i][mask],
+                                 z[i][mask],
+                                 vx[i][mask],
+                                 vy[i][mask],
+                                 vz[i][mask]], axis=1)
     print('finished writing data after {} seconds'.format(time.time() -
                                                           startTfun))
 
@@ -286,7 +290,7 @@ if flag == 1:
     print("That took {:3E} years".format(t[-1] / 3.154e7))
     print("writing parameters and orbit to file")
     write_general_info()
-    write_pointParticle_orbit(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t)
+    write_pointParticle_orbit_zarr(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t)
     print("generating axion star as {} particles".format(int(Nparticles)))
     pAS_x, pAS_y, pAS_z, pAS_vx, pAS_vy, pAS_vz = mk_axstar(
         AS_x[-1], AS_y[-1], AS_z[-1], AS_vx[-1], AS_vy[-1], AS_vz[-1],
@@ -294,20 +298,16 @@ if flag == 1:
 elif flag == 2:
     print("Your axion star never came close enough to the neutron star")
     print("writing parameters and orbit to file")
-    write_pointParticle_orbit(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t)
+    write_pointParticle_orbit_zarr(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t)
     print("aborting program...")
     sys.exit()
 
-# create file structure for particle ouput
-os.mkdir(fpath_out + '/orbits')
-
-fout_orbit_names = [
-    fpath_out + '/orbits/p_' + str(int(i)) + '.txt' for i in range(Nparticles)
-]
+# output zarr group:
+out_zarr = zarr.open(fpath_out + 'orbits')
+compressor = LZ4()
+#compressor = Blosc(cname='lz4')
 for i in range(Nparticles):
-    fo = open(fout_orbit_names[i], 'w')
-    fo.write('# t[s]  x[km]  y[km]  z[km]  vx[km]  vy[km]  vz[km]\n')
-    fo.close()
+    out_zarr.array(str(i), np.empty((7, 0)), chunks=((7, 2500)), compressor=compressor)
 
 # run the particles until all (except at most 5) are outbound and outside
 # Rcut set in find_inds_active
