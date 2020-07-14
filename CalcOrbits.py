@@ -63,7 +63,7 @@ def update_r_v(rx, ry, rz, vx, vy, vz, mu, NSR, rprecision=1e-3, dtmax=1e25):
     if np.isscalar(dt):
         dt = np.min([dt, dtmax])
     else:
-        np.minimum(dt, dtmax * np.ones(dt.shape))
+        np.minimum(dt, np.full(dt.shape, dtmax))
     # calculate the acceleration
     r[np.where(
         r < NSR
@@ -151,7 +151,7 @@ def write_general_info():
 
 def write_pointParticle_orbit_zarr(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t):
     """ write axion star to file """
-    fo = zarr.open(fpath_out + '/AS_pointParticle_orbit.zarr', 'w')
+    fo = zarr.open(fpath_out + '_AS_pointParticle_orbit.zarr', 'w')
     fo.array("t", t)
     fo.array("AS_x", AS_x)
     fo.array("AS_y", AS_y)
@@ -227,7 +227,7 @@ def write_orbits_to_disk(x,
     vy = np.array(vy[::nskip]).T
     vz = np.array(vz[::nskip]).T
 
-    for i in range(len(inds_active)):
+    for i in inds_active:
         mask = x[i]**2 + y[i]**2 + z[i]**2 < Rcut**2
 
         out_zarr[str(i)].append([t[i][mask],
@@ -304,7 +304,7 @@ elif flag == 2:
     sys.exit()
 
 # output zarr group:
-out_zarr = zarr.open(fpath_out + 'orbits')
+out_zarr = zarr.open(fpath_out + '_orbits')
 compressor = LZ4()
 #compressor = Blosc(cname='lz4')
 for i in range(Nparticles):
@@ -312,7 +312,7 @@ for i in range(Nparticles):
 
 # run the particles until all (except at most 5) are outbound and outside
 # Rcut set in find_inds_active
-t = t[-1] * np.ones(pAS_x.shape)
+t = np.full(pAS_x.shape, t[-1])
 inds_active = find_inds_active(pAS_x, pAS_y, pAS_z, pAS_vx, pAS_vy, pAS_vz)
 while len(inds_active) > 5:
     x_list, y_list, z_list, vx_list, vy_list, vz_list, t_list = run_particles_nsteps(
