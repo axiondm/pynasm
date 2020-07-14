@@ -3,9 +3,10 @@ from __future__ import division
 import sys
 import time
 import os
+import string
+import random
 
 import numpy as np
-from scipy.integrate import solve_ivp
 
 # ----------------------------------------------------
 # enter parameters
@@ -29,11 +30,13 @@ NS_radius = 10.    # radius [km]
 # constants
 G_N = 1.325e11    # Newton constant in km^3/Msol/s^2
 
-# generate folder for output
-startT = time.time()
-str_startT = time.strftime("%Y%m%d_%H%M")
-fpath_out = 'run_' + str_startT
-os.mkdir(fpath_out)
+# compute gravitational parameter
+mu = NS_mass * G_N
+# calculate velocity dispersion of axion star
+AS_sigmav = np.sqrt(G_N * AS_mass / AS_radius)
+# AS_sigmav = 1.151086e-3
+# calculate Roche disruption radius
+R_dis = AS_radius * (2. * NS_mass / AS_mass)**(1. / 3.)    # [km]
 
 # some parameters for the code and the output
 # radius [km] at which partices leaving the neutron star are dropped
@@ -45,6 +48,10 @@ mem_size = 1.    # target size of memory [GB] the calculation fills
 
 # ----------------------------------------------------
 # functions
+
+
+def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
+    return ''.join(random.choice(chars) for _ in range(size))
 
 
 def update_r_v(rx, ry, rz, vx, vy, vz, mu, NSR, rprecision=1e-3, dtmax=1e25):
@@ -233,15 +240,15 @@ def write_orbits_to_disk(x,
 # ----------------------------------------------------
 # run
 # ----------------------------------------------------
-# compute gravitational parameter
-mu = NS_mass * G_N
-# calculate velocity dispersion of axion star
-AS_sigmav = np.sqrt(G_N * AS_mass / AS_radius)
-#AS_sigmav = 1.151086e-3
-# calculate Roche disruption radius
-R_dis = AS_radius * (2. * NS_mass / AS_mass)**(1. / 3.)    #[km]
 
-# run the axion star as a point particle until it either reaches the disruption radius or flies away from the NS
+# generate folder for output
+startT = time.time()
+str_startT = time.strftime("%Y%m%d_%H%M")
+fpath_out = 'run_' + str_startT + id_generator()
+os.mkdir(fpath_out)
+
+# run the axion star as a point particle until it either reaches the
+# disruption radius or flies away from the NS
 AS_x = np.array([AS_r0[0]])
 AS_y = np.array([AS_r0[1]])
 AS_z = np.array([AS_r0[2]])
@@ -271,7 +278,8 @@ while flag == 0:
     elif x * vx + y * vy + z * vz > 0:    # check if axion star is outbound
         flag = 2
 
-# write results of inital calculation to file, and generate axion star as collection of particles
+# write results of inital calculation to file, and generate axion
+# star as collection of particles
 print("Calculation of axion star as point particle finished.")
 if flag == 1:
     print("Your axion made it to the disruption radius")
@@ -301,7 +309,8 @@ for i in range(Nparticles):
     fo.write('# t[s]  x[km]  y[km]  z[km]  vx[km]  vy[km]  vz[km]\n')
     fo.close()
 
-# run the particles until all (except at most 5) are outbound and outside Rcut set in find_inds_active
+# run the particles until all (except at most 5) are outbound and outside
+# Rcut set in find_inds_active
 t = t[-1] * np.ones(pAS_x.shape)
 inds_active = find_inds_active(pAS_x, pAS_y, pAS_z, pAS_vx, pAS_vy, pAS_vz)
 while len(inds_active) > 5:
