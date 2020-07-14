@@ -248,7 +248,8 @@ def write_orbits_to_disk(x,
 # generate folder for output
 startT = time.time()
 str_startT = time.strftime("%Y%m%d_%H%M")
-fpath_out = 'run_' + str_startT + id_generator()
+basedir = './'
+fpath_out = basedir + 'run_' + str_startT + id_generator()
 os.mkdir(fpath_out)
 
 # run the axion star as a point particle until it either reaches the
