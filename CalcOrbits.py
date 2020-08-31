@@ -9,6 +9,7 @@ import zarr
 from numcodecs import LZ4, Blosc
 import numpy as np
 
+
 # ----------------------------------------------------
 # enter parameters
 # units: Masses [solar masses]
@@ -45,7 +46,7 @@ R_dis = AS_radius * (2. * NS_mass / AS_mass)**(1. / 3.)    # [km]
 Rdrop = 1e4
 Rsave = 1e3    # radius [km] within in which orbits are written to file
 nwrite = 100    # number of steps in output to skip when writing to file
-mem_size = 5.    # target size of memory [GB] the calculation fills
+mem_size = 1.    # target size of memory [GB] the calculation fills
 
 # ----------------------------------------------------
 # functions
@@ -151,7 +152,7 @@ def write_general_info():
 
 def write_pointParticle_orbit_zarr(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t):
     """ write axion star to file """
-    fo = zarr.open(fpath_out + '_AS_pointParticle_orbit.zarr', 'w')
+    fo = zarr.open(fpath_out + '/AS_pointParticle_orbit.zarr', 'w')
     fo.array("t", t)
     fo.array("AS_x", AS_x)
     fo.array("AS_y", AS_y)
@@ -227,10 +228,10 @@ def write_orbits_to_disk(x,
     vy = np.array(vy[::nskip]).T
     vz = np.array(vz[::nskip]).T
 
-    for i in inds_active:
+    for i, ind in enumerate(inds_active):
         mask = x[i]**2 + y[i]**2 + z[i]**2 < Rcut**2
 
-        out_zarr[str(i)].append([t[i][mask],
+        out_zarr[str(ind)].append([t[i][mask],
                                  x[i][mask],
                                  y[i][mask],
                                  z[i][mask],
@@ -248,7 +249,7 @@ def write_orbits_to_disk(x,
 # generate folder for output
 startT = time.time()
 str_startT = time.strftime("%Y%m%d_%H%M")
-basedir = './'
+basedir = '/cfs/home/mala2765/scratch/pynasm/'
 fpath_out = basedir + 'run_' + str_startT + id_generator()
 os.mkdir(fpath_out)
 
@@ -303,12 +304,19 @@ elif flag == 2:
     print("aborting program...")
     sys.exit()
 
+# log file
+
+original_stdout = sys.stdout # Save a reference to the original standard output
+
+logfile = open(fpath_out + '/log.txt', 'w')
+sys.stdout = logfile # Change the standard output to the file we created.
+
 # output zarr group:
-out_zarr = zarr.open(fpath_out + '_orbits')
+out_zarr = zarr.open(fpath_out + '/orbits.zarr')
 compressor = LZ4()
 #compressor = Blosc(cname='lz4')
 for i in range(Nparticles):
-    out_zarr.array(str(i), np.empty((7, 0)), chunks=((7, 2500)), compressor=compressor)
+    out_zarr.array(str(i), np.empty((7, 0)), chunks=((7, 25000)), compressor=compressor)
 
 # run the particles until all (except at most 5) are outbound and outside
 # Rcut set in find_inds_active
@@ -327,3 +335,6 @@ while len(inds_active) > 5:
             inds_active] = x_list[-1], y_list[-1], z_list[-1], vx_list[
                 -1], vy_list[-1], vz_list[-1], t_list[-1]
     inds_active = find_inds_active(pAS_x, pAS_y, pAS_z, pAS_vx, pAS_vy, pAS_vz)
+
+logfile.close()
+sys.stdout = original_stdout # Reset the standard output to its
