@@ -249,7 +249,8 @@ def write_orbits_to_disk(x,
 # generate folder for output
 startT = time.time()
 str_startT = time.strftime("%Y%m%d_%H%M")
-basedir = '/cfs/home/mala2765/scratch/pynasm/'
+#basedir = '/cfs/home/mala2765/scratch/pynasm/'
+basedir = './'
 fpath_out = basedir + 'run_' + str_startT + id_generator()
 os.mkdir(fpath_out)
 
@@ -306,10 +307,10 @@ elif flag == 2:
 
 # log file
 
-original_stdout = sys.stdout # Save a reference to the original standard output
+# original_stdout = sys.stdout # Save a reference to the original standard output
 
-logfile = open(fpath_out + '/log.txt', 'w')
-sys.stdout = logfile # Change the standard output to the file we created.
+# logfile = open(fpath_out + '/log.txt', 'w')
+# sys.stdout = logfile # Change the standard output to the file we created.
 
 # output zarr group:
 out_zarr = zarr.open(fpath_out + '/orbits.zarr')
@@ -336,5 +337,5 @@ while len(inds_active) > 5:
                 -1], vy_list[-1], vz_list[-1], t_list[-1]
     inds_active = find_inds_active(pAS_x, pAS_y, pAS_z, pAS_vx, pAS_vy, pAS_vz)
 
-logfile.close()
-sys.stdout = original_stdout # Reset the standard output to its
+#logfile.close()
+# sys.stdout = original_stdout # Reset the standard output to its

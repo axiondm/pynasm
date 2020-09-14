@@ -130,5 +130,7 @@ dmypy.json
 
 # output files
 *.zarr
-run*/
-
+run*
+.run*
+*.mp4
+*.gif
