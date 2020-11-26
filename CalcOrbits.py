@@ -1,12 +1,13 @@
 from __future__ import division
 
 import os
-import random
-import string
 import sys
 import time
+import random
+import string
 
 import numpy as np
+from scipy.optimize import root
 import zarr
 from numcodecs import LZ4, Blosc
 
@@ -16,37 +17,47 @@ from numcodecs import LZ4, Blosc
 #        Distances [km]
 #        Time      [s]
 
-Nparticles = int(1e4)  # number of particles in axion star
+Nparticles = int(1e5)  # number of particles in axion clump
 
-# inital conditions for axion structure
+# initial conditions for axion clump
+AC_r0 = np.array([1e14, 6e3, 0.])  # initial position [km]
+AC_v0 = np.array([-300., 0., 0.])  # initial velocity [km/s]
+
+# parameters for axion minicluster
+MC_switch = False  # set to true if you want to simulate a minicluster
+MC_mass = 1e-11  # minicluster mass in [solar masses]
+MC_delta = 1  # initial overdensity of the minicluster
+# NFW profile:
+MC_NFW_switch = True  # set to true for a NFW density profile for the minicluster
+MC_c = 100  # concentration parameter for the minicluster
+# Power law profile:
+MC_PL_switch = False  # set to true for a power law density profile for the minicluster
+
+# parameters for (dilute) axion star
+AS_switch = True
 AS_mass = 1e-13  # mass [M_sol]
-AS_radius = 8e2  # radius [km]
-AS_r0 = np.array([1e12, 6e3, 0.])  # inital position [km]
-AS_v0 = np.array([-300., 0., 0.])  # inital velocity [km/s]
+ax_mass = 2.6e-5  # axion (particle) mass in [eV]
 
-# neutron star parameter
+# parameters for neutron star
 NS_mass = 1.4  # mass [M_sol]
 NS_radius = 10.  # radius [km]
+
+# some parameters for the code and the output
+Rdrop = 1e4  # radius [km] at which particles leaving the neutron star are dropped from the calculation
+Rsave = 1e3  # radius [km] within in which orbits are written to file
+nwrite = 100  # number of steps in output to skip when writing to file
+mem_size = 1.  # target size of memory [GB] the calculation fills
+
+
+# switch for the way the results are written to disk
+out_format_switch = 1
+# if out_format_switch == 1, orbits are written as a collection of plain text files
+# if out_format_switch == 2, orbits written as zarr files
+
 
 # ----------------------------------------------------
 # constants
 G_N = 1.325e11  # Newton constant in km^3/Msol/s^2
-
-# compute gravitational parameter
-mu = NS_mass * G_N
-# calculate velocity dispersion of axion star
-AS_sigmav = np.sqrt(G_N * AS_mass / AS_radius)
-# AS_sigmav = 1.151086e-3
-# calculate Roche disruption radius
-R_dis = AS_radius * (2. * NS_mass / AS_mass)**(1. / 3.)  # [km]
-
-# some parameters for the code and the output
-# radius [km] at which partices leaving the neutron star are dropped
-# from the calculation
-Rdrop = 1e4
-Rsave = 1e3  # radius [km] within in which orbits are written to file
-nwrite = 100  # number of steps in output to skip when writing to file
-mem_size = 1.  # target size of memory [GB] the calculation fills
 
 # ----------------------------------------------------
 # functions
@@ -54,9 +65,6 @@ mem_size = 1.  # target size of memory [GB] the calculation fills
 
 def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
     return ''.join(random.choice(chars) for _ in range(size))
-
-
-###################################
 
 
 def update_r_v(rx, ry, rz, vx, vy, vz, mu, NSR, rprecision=1e-3, dtmax=1e25):
@@ -93,87 +101,179 @@ def update_r_v(rx, ry, rz, vx, vy, vz, mu, NSR, rprecision=1e-3, dtmax=1e25):
     return out_rx, out_ry, out_rz, out_vx, out_vy, out_vz, dt
 
 
-###########################
+def rho_MC(delta, rhoeq=4.39e-38):
+    """
+   returns the characteristic density of an 
+   axion minicluster in [solar masses/km^3]
+   forming from an overdensity with 
+   overdensity parameter delta.
+   rhoeq is the matter density at matter 
+   radiation equality in [solar masses/km^3]
+   """
+    return 140 * (1 + delta) * delta**3 * rhoeq
 
 
-def mk_axstar(x0, y0, z0, vx0, vy0, vz0, Np):
-    """ returns Np long list of particles centered around x0, v0
-       gaussian distribution for positions with 90% of mass in AS_radius
-       maxwellian velocity profile truncated at the escape velocity """
-    Np = int(Np)
-    xout = np.zeros(Np)
-    yout = np.zeros(Np)
-    zout = np.zeros(Np)
+def NFW_rs(MCM, MCrho, MCc):
+    """
+   returns the scale radius in [km] for a minicluster
+   with 
+   - mass MCM in [solar masses]
+   - characteristic density MCrho [solar masses/km^3]
+   - concentration parameter MCc
+   """
+    f = np.log(1. + MCc) - MCc / (1. + MCc)
+    return (MCM / (4. * np.pi * MCrho * f))**(1. / 3.)
+
+
+def NFW_R90_fun(x, c):
+    """ 
+   helper function to get R90
+   for a NFW profile
+   """
+    return 0.9 * (np.log(1. + c) - c / (1. + c)) - (np.log(1. + x) - x /
+                                                    (1. + x))
+
+
+def R90_NFW(MCM, MCrho, MCc):
+    """
+   returns R90 in [km] for a minicluster with a
+   NFW density profile and
+   - mass MCM in[solar masses]
+   - characteristic density MCrho [solar masses/km^3]
+   - concentration parameter MCc
+   """
+    rs = NFW_rs(MCM, MCrho, MCc)
+    x = root(NFW_R90_fun, MCc, args=MCc).x[0]
+    return x * rs
+
+
+def dens_dist_NFW(x0, y0, z0, MCM, MCrho, MCc, Np):
+    """
+   returns Np long lists of positions in [km]
+   in cartesian coordinates,
+   assuming a NFW distribution centered at 
+   x0, z0, y0 in [km] for an axion minicluster with
+   - mass MCM in [solar masses]
+   - characteristic density MCrho in [solar masses/km^3]
+   - concentration parameter MCc  
+   """
+    rs = NFW_rs(MCM, MCrho, MCc)
+    rvec = np.linspace(0, MCc * rs, int(1e6))
+    rpdf = rvec**2 / (rvec / rs * (1. + rvec / rs)**2)
+    rpdf[0] = 0.  # fix first entry
+    # generate random distributions
+    rng = np.random.default_rng()
+    costheta = rng.uniform(-1., 1., size=int(Np))
+    phi = rng.uniform(0, 2. * np.pi, size=int(Np))
+    r = rng.choice(rvec, p=rpdf / np.sum(rpdf), size=int(Np))
+    # generate out vectors
+    x = x0 + r * np.sin(np.arccos(costheta)) * np.cos(phi)
+    y = y0 + r * np.sin(np.arccos(costheta)) * np.sin(phi)
+    z = z0 + r * costheta
+    return x, y, z
+
+
+def R90_PL(MCM, MCrho):
+    """
+   returns R90 in [km] for a minicluster with a
+   Power-Law (index 9/4) density profile and
+   - mass MCM in[solar masses]
+   - characteristic density MCrho [solar masses/km^3]
+   """
+    return (0.9**4 * 3. * MCM / (4. * np.pi * MCrho))**(1. / 3.)
+
+
+def dens_dist_PL(x0, y0, z0, MCM, MCrho, Np):
+    """
+   returns Np long lists of positions in [km]
+   in cartesian coordinates,
+   assuming a Power-Law profile (index 9/4) centered at 
+   x0, z0, y0 in [km] for an axion minicluster with
+   - mass MCM in [solar masses]
+   - characteristic density MCrho in [solar masses/km^3]
+   """
+    RPL = (3. * MCM / (4. * np.pi * MCrho))**(1. / 3.)  # truncation radius
+    rvec = np.linspace(0, RPL, int(1e6))
+    rpdf = rvec**-0.25
+    rvec = rvec[1:]
+    rpdf = rpdf[1:]
+    # generate random distributions
+    rng = np.random.default_rng()
+    costheta = rng.uniform(-1., 1., size=int(Np))
+    phi = rng.uniform(0, 2. * np.pi, size=int(Np))
+    r = rng.choice(rvec, p=rpdf / np.sum(rpdf), size=int(Np))
+    # generate out vectors
+    x = x0 + r * np.sin(np.arccos(costheta)) * np.cos(phi)
+    y = y0 + r * np.sin(np.arccos(costheta)) * np.sin(phi)
+    z = z0 + r * costheta
+    return x, y, z
+
+
+def R90_AS(ASM, ma):
+    """
+   returns R90 in [km] for a 
+   dilute axion star with
+   - axion star mass ASM in [solar masses]
+   - axion particle mass ma in [eV]
+   """
+    ak = 9.9  # numerical factor from [1710.08910]
+    c_kms = 2.998e5  # speed of light in [km/s]
+    hbarc_eVkm = 1.973e-10  # hbar*c in [eV.km]
+    unitfac = c_kms**2 * hbarc_eVkm**2
+    return unitfac * ak / G_N / ma**2 / ASM
+
+
+def dens_dist_sech(x0, y0, z0, ASM, ma, Np):
+    """
+   returns Np long lists of positions in [km]
+   in cartesian coordinates,
+   assuming the sech density profile [1710.04729]
+   for an dilute axion star with mass ASM in [solar masses] 
+   for an axion (particle) mass ma in [eV] centered at 
+   x0, z0, y0 in [km] for an axion minicluster with
+   - axion star mass ASM in [solar masses]
+   - axion particle mass ma in [eV]
+   """
+    Rsech = R90_AS(ASM, ma) / 2.799  # numerical factor from [1710.04729]
+    rvec = np.linspace(0, 10. * Rsech, int(1e6))
+    rpdf = rvec**2 / np.cosh(rvec / Rsech)**2
+    # generate random distributions
+    rng = np.random.default_rng()
+    costheta = rng.uniform(-1., 1., size=int(Np))
+    phi = rng.uniform(0, 2. * np.pi, size=int(Np))
+    r = rng.choice(rvec, p=rpdf / np.sum(rpdf), size=int(Np))
+    # generate out vectors
+    x = x0 + r * np.sin(np.arccos(costheta)) * np.cos(phi)
+    y = y0 + r * np.sin(np.arccos(costheta)) * np.sin(phi)
+    z = z0 + r * costheta
+    return x, y, z
+
+
+def velocity_dist_flat(vx0, vy0, vz0, Np, vesc):
+    """
+   returns Np long lists of velocities in [km/s] 
+   in cartesian coordinates.
+   assumes a flat distribution cut off at vesc in the frame 
+   of the axion clump,
+   boosted to the frame specified by vx0, vy0, vz0 in [km/s]
+   out:
+      tuple of velocity vectors in cartesian coordinates 
+      (vx, vy, vz)
+      units fixed by input units of vxi and vesc
+   """
     vxout = np.zeros(Np)
     vyout = np.zeros(Np)
     vzout = np.zeros(Np)
-    # make random variables for v
-    vesc = np.sqrt(2. * mu / AS_radius)
-    v_vec = np.linspace(0, vesc, int(1e6))
-    v_pdf = v_vec**2. * np.exp(-v_vec**2. / (2. * AS_sigmav**2.))
-    v_cT = np.random.rand(Np) * 2. - 1.
-    v_sT = np.sin(np.arccos(v_cT))
-    v_phi = np.random.rand(Np) * 2. * np.pi
-    v_sphi = np.sin(v_phi)
-    v_cphi = np.cos(v_phi)
-    v_v = np.random.choice(v_vec, p=v_pdf / np.sum(v_pdf), size=Np)
-    # make random variabls for x
-    r_vec = np.linspace(0, 3. * AS_radius, int(3e6))
-    r_pdf = r_vec**2 * np.exp(
-        -r_vec**2. / (2. * (AS_radius / 2.5)**2.)
-    )  # includes fudge factor to define AS_radius as R_90
-    x_cT = np.random.rand(Np) * 2. - 1.
-    x_sT = np.sin(np.arccos(x_cT))
-    x_phi = np.random.rand(Np) * 2. * np.pi
-    x_sphi = np.sin(x_phi)
-    x_cphi = np.cos(x_phi)
-    x_r = np.random.choice(r_vec, p=r_pdf / np.sum(r_pdf), size=Np)
-    for n in range(Np):
-        xout[n] = x0 + x_r[n] * x_sT[n] * x_cphi[n]
-        yout[n] = y0 + x_r[n] * x_sT[n] * x_sT[n] * x_sphi[n]
-        zout[n] = z0 + x_r[n] * x_sT[n] * x_cT[n]
-        vxout[n] = vx0 + v_v[n] * v_sT[n] * v_cphi[n]
-        vyout[n] = vy0 + v_v[n] * v_sT[n] * v_sphi[n]
-        vzout[n] = vz0 + v_v[n] * v_cT[n]
-    return xout, yout, zout, vxout, vyout, vzout
-
-
-def write_general_info():
-    """ write general info to file """
-    fo = open(fpath_out + '/general.txt', 'w')
-    fo.write('# neutron star parameters\n')
-    fo.write('{:3E} # mass [solar masses]\n'.format(NS_mass))
-    fo.write('{:3E} # radius [km]\n'.format(NS_radius))
-    fo.write('# axion clump parameters\n')
-    fo.write('{:3E} # mass [solar masses]\n'.format(AS_mass))
-    fo.write('{:3E} # radius R90 [km]\n'.format(AS_radius))
-    fo.write('{:3E} # velocity dispersion [km/s]\n'.format(AS_sigmav))
-    fo.write('{:3E}  {:3E}  {:3E} # inital coordinates [km]\n'.format(
-        AS_r0[0], AS_r0[1], AS_r0[2]))
-    fo.write('{:3E}  {:3E}  {:3E} # inital velocity [km/s]\n'.format(
-        AS_v0[0], AS_v0[1], AS_v0[2]))
-    fo.write('{:3E} # number of particles in lump\n'.format(Nparticles))
-    fo.write(
-        '{:3E} # radius [km] at which outgoing particles are dropped in calculation\n'
-        .format(Rdrop))
-    fo.write(
-        '{:3E} # radius [km] within which orbits are written to file\n'.format(
-            Rsave))
-    fo.write(
-        '{} # number of steps skipping when writing output\n'.format(nwrite))
-    fo.close()
-
-
-def write_pointParticle_orbit_zarr(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t):
-    """ write axion star to file """
-    fo = zarr.open(fpath_out + '/AS_pointParticle_orbit.zarr', 'w')
-    fo.array("t", t)
-    fo.array("AS_x", AS_x)
-    fo.array("AS_y", AS_y)
-    fo.array("AS_z", AS_z)
-    fo.array("AS_vx", AS_vx)
-    fo.array("AS_vy", AS_vy)
-    fo.array("AS_vz", AS_vz)
+    # generate random distributions
+    rng = np.random.default_rng()
+    costheta = rng.uniform(-1., 1., size=int(Np))
+    phi = rng.uniform(0, 2. * np.pi, size=int(Np))
+    v = vesc * rng.power(3, size=int(Np))
+    # generate out vectors
+    vx = vx0 + v * np.sin(np.arccos(costheta)) * np.cos(phi)
+    vy = vy0 + v * np.sin(np.arccos(costheta)) * np.sin(phi)
+    vz = vz0 + v * costheta
+    return vx, vy, vz
 
 
 def find_nsteps(Np, target_size=mem_size):
@@ -221,7 +321,97 @@ def run_particles_nsteps(x0, y0, z0, vx0, vy0, vz0, t0, target_size=mem_size):
     return x, y, z, vx, vy, vz, t
 
 
+def write_general_info():
+    """ write general info to file """
+    fo = open(fpath_out + '/general.txt', 'w')
+    fo.write('# neutron star parameters\n')
+    fo.write('{:3E} # mass [solar masses]\n'.format(NS_mass))
+    fo.write('{:3E} # radius [km]\n'.format(NS_radius))
+    fo.write('# axion clump parameters\n')
+    if MC_switch and MC_NFW_switch:
+        fo.write('# this is an axion minicluster with a NFW density profile\n')
+    elif MC_switch and MC_PL_switch:
+        fo.write('# this is an axion minicluster with a power law profile\n')
+    elif AS_switch:
+        fo.write('# this is a dilute axion star\n')
+        fo.write('{:3E} # axion mass [eV]\n'.format(ax_mass))
+    fo.write('{:3E} # mass [solar masses]\n'.format(AC_mass))
+    fo.write('{:3E} # radius R90 [km]\n'.format(AC_R90))
+    fo.write('{:3E} # escape velocity [km/s]\n'.format(AC_vesc))
+    fo.write('{:3E}  {:3E}  {:3E} # initial coordinates [km]\n'.format(
+        AC_r0[0], AC_r0[1], AC_r0[2]))
+    fo.write('{:3E}  {:3E}  {:3E} # initial velocity [km/s]\n'.format(
+        AC_v0[0], AC_v0[1], AC_v0[2]))
+    fo.write('{:3E} # disruption radius [km]\n'.format(R_dis))
+    fo.write('{:3E} # number of particles in clump\n'.format(Nparticles))
+    fo.write(
+        '{:3E} # radius [km] at which outgoing particles are dropped in calculation\n'
+        .format(Rdrop))
+    fo.write(
+        '{:3E} # radius [km] within which orbits are written to file\n'.format(
+            Rsave))
+    fo.write(
+        '{} # number of steps skipping when writing output\n'.format(nwrite))
+    fo.close()
+
+
+def write_pointParticle_orbit(AC_x, AC_y, AC_z, AC_vx, AC_vy, AC_vz, t):
+    """ write axion clump to file """
+    fo = open(fpath_out + '/AC_pointParticle_orbit.txt', 'w')
+    fo.write('# t[s]  x[km]  y[km]  z[km]  vx[km]  vy[km]  vz[km]\n')
+    for i in range(len(AC_x)):
+        fo.write('{:.12E}  '.format(t[i]))
+        fo.write('{:.6E}  '.format(AC_x[i]))
+        fo.write('{:.6E}  '.format(AC_y[i]))
+        fo.write('{:.6E}  '.format(AC_z[i]))
+        fo.write('{:.6E}  '.format(AC_vx[i]))
+        fo.write('{:.6E}  '.format(AC_vy[i]))
+        fo.write('{:.6E}'.format(AC_vz[i]))
+        fo.write('\n')
+    fo.close()
+
+
+def write_pointParticle_orbit_zarr(AC_x, AC_y, AC_z, AC_vx, AC_vy, AC_vz, t):
+    """ write axion star to file """
+    fo = zarr.open(fpath_out + '/AC_pointParticle_orbit.zarr', 'w')
+    fo.array("t", t)
+    fo.array("AC_x", AC_x)
+    fo.array("AC_y", AC_y)
+    fo.array("AC_z", AC_z)
+    fo.array("AC_vx", AC_vx)
+    fo.array("AC_vy", AC_vy)
+    fo.array("AC_vz", AC_vz)
+
+
 def write_orbits_to_disk(x,
+                         y,
+                         z,
+                         vx,
+                         vy,
+                         vz,
+                         t,
+                         inds_active,
+                         Rcut=Rsave,
+                         nskip=nwrite):
+    """ appends the orbit files of particles in inds_active with the results 
+       only every nskip-th timestep is written to file"""
+    startTfun = time.time()
+    for i in range(len(inds_active)):
+        fo = open(fout_orbit_names[inds_active[i]], 'a')
+        j = 0
+        while j < len(t) - 1:
+            if (x[j][i]**2. + y[j][i]**2. + z[j][i]**2.) < Rcut**2.:
+                fo.write(
+                    '{:.12E}  {:.6E}  {:.6E}  {:.6E}  {:.6E}  {:.6E}  {:.6E}\n'
+                    .format(t[j][i], x[j][i], y[j][i], z[j][i], vx[j][i],
+                            vy[j][i], vz[j][i]))
+            j += nskip
+        fo.close()
+    print('finished writing data after {} seconds'.format(time.time() -
+                                                          startTfun))
+
+
+def write_orbits_to_disk_zarr(x,
                          y,
                          z,
                          vx,
@@ -241,10 +431,8 @@ def write_orbits_to_disk(x,
     vx = np.array(vx[::nskip]).T
     vy = np.array(vy[::nskip]).T
     vz = np.array(vz[::nskip]).T
-
     for i, ind in enumerate(inds_active):
         mask = x[i]**2 + y[i]**2 + z[i]**2 < Rcut**2
-
         out_zarr[str(ind)].append([
             t[i][mask], x[i][mask], y[i][mask], z[i][mask], vx[i][mask],
             vy[i][mask], vz[i][mask]
@@ -253,104 +441,174 @@ def write_orbits_to_disk(x,
     print('finished writing data after {} seconds'.format(time.time() -
                                                           startTfun))
 
-
 # ----------------------------------------------------
 # run
 # ----------------------------------------------------
-
 # generate folder for output
 startT = time.time()
 str_startT = time.strftime("%Y%m%d_%H%M")
-#basedir = '/cfs/home/mala2765/scratch/pynasm/'
 basedir = './'
 fpath_out = basedir + 'run_' + str_startT + id_generator()
 os.mkdir(fpath_out)
 
-# run the axion star as a point particle until it either reaches the
-# disruption radius or flies away from the NS
-AS_x = np.array([AS_r0[0]])
-AS_y = np.array([AS_r0[1]])
-AS_z = np.array([AS_r0[2]])
-AS_vx = np.array([AS_v0[0]])
-AS_vy = np.array([AS_v0[1]])
-AS_vz = np.array([AS_v0[2]])
+# compute gravitational parameter
+mu = NS_mass * G_N
+# check if switches are set up correctly
+if MC_switch * MC_NFW_switch + MC_switch * MC_PL_switch + AS_switch != 1:
+    print(
+        "you did not make a reasonable selection of the options for the axion clump (NFW_minicluster/PL_minicluster/axion star)"
+    )
+    print("aborting the code...")
+    sys.exit()
+
+# check if the minicluster is less dense than an dilute axion star
+# this assumes that the axion mass is given by ax_mass
+if MC_switch:
+    if MC_NFW_switch and R90_NFW(MC_mass, rho_MC(MC_delta), MC_c) < R90_AS(
+            MC_mass, ax_mass):
+        print(
+            "your minicluster is denser than an axion star for a {} eV axion".
+            format(ax_mass))
+        print("aborting the code...")
+        sys.exit()
+    elif MC_PL_switch and R90_PL(MC_mass, rho_MC(MC_delta)) < R90_AS(
+            MC_mass, ax_mass):
+        print(
+            "your minicluster is denser than an axion star for a {} eV axion".
+            format(ax_mass))
+        print("aborting the code...")
+        sys.exit()
+
+# set up the mk_axclump function and calculate the disruption radius
+if MC_switch:
+    AC_mass = MC_mass
+    if MC_NFW_switch:
+        AC_R90 = R90_NFW(MC_mass, rho_MC(MC_delta), MC_c)
+        AC_vesc = np.sqrt(2. * G_N * AC_mass / AC_R90)
+
+        def mk_axclump(x0, y0, z0, vx0, vy0, vz0, Np):
+            x, y, z = dens_dist_NFW(x0, y0, z0, AC_mass, rho_MC(MC_delta),
+                                    MC_c, Np)
+            vx, vy, vz = velocity_dist_flat(vx0, vy0, vz0, Np, AC_vesc)
+            return x, y, z, vx, vy, vz
+    elif MC_PL_switch:
+        AC_R90 = R90_PL(MC_mass, rho_MC(MC_delta))
+        AC_vesc = np.sqrt(2. * G_N * AC_mass / AC_R90)
+
+        def mk_axclump(x0, y0, z0, vx0, vy0, vz0, Np):
+            x, y, z = dens_dist_PL(x0, y0, z0, AC_mass, rho_MC(MC_delta), Np)
+            vx, vy, vz = velocity_dist_flat(vx0, vy0, vz0, Np, AC_vesc)
+            return x, y, z, vx, vy, vz
+elif AS_switch:
+    AC_mass = AS_mass
+    AC_R90 = R90_AS(AC_mass, ax_mass)
+    AC_vesc = np.sqrt(2. * G_N * AC_mass / AC_R90)
+
+    def mk_axclump(x0, y0, z0, vx0, vy0, vz0, Np):
+        x, y, z = dens_dist_sech(x0, y0, z0, AC_mass, ax_mass, Np)
+        vx, vy, vz = velocity_dist_flat(vx0, vy0, vz0, Np, AC_vesc)
+        return x, y, z, vx, vy, vz
+
+
+# calculate Roche disruption radius
+R_dis = AC_R90 * (2. * NS_mass / AC_mass)**(1. / 3.)  #[km]
+
+# run the axion clump as a point particle until it either reaches the disruption radius or flies away from the NS
+AC_x = np.array([AC_r0[0]])
+AC_y = np.array([AC_r0[1]])
+AC_z = np.array([AC_r0[2]])
+AC_vx = np.array([AC_v0[0]])
+AC_vy = np.array([AC_v0[1]])
+AC_vz = np.array([AC_v0[2]])
 t = np.array([0.])
 flag = 0
 while flag == 0:
-    x, y, z, vx, vy, vz, dt = update_r_v(np.array([AS_x[-1]]),
-                                         np.array([AS_y[-1]]),
-                                         np.array([AS_z[-1]]),
-                                         np.array([AS_vx[-1]]),
-                                         np.array([AS_vy[-1]]),
-                                         np.array([AS_vz[-1]]), mu, NS_radius)
-    AS_x = np.append(AS_x, x[0])
-    AS_y = np.append(AS_y, y[0])
-    AS_z = np.append(AS_z, z[0])
-    AS_vx = np.append(AS_vx, vx[0])
-    AS_vy = np.append(AS_vy, vy[0])
-    AS_vz = np.append(AS_vz, vz[0])
+    x, y, z, vx, vy, vz, dt = update_r_v(np.array([AC_x[-1]]),
+                                         np.array([AC_y[-1]]),
+                                         np.array([AC_z[-1]]),
+                                         np.array([AC_vx[-1]]),
+                                         np.array([AC_vy[-1]]),
+                                         np.array([AC_vz[-1]]), mu, NS_radius)
+    AC_x = np.append(AC_x, x[0])
+    AC_y = np.append(AC_y, y[0])
+    AC_z = np.append(AC_z, z[0])
+    AC_vx = np.append(AC_vx, vx[0])
+    AC_vy = np.append(AC_vy, vy[0])
+    AC_vz = np.append(AC_vz, vz[0])
     t = np.append(t, t[-1] + dt)
     if np.sqrt(
             x**2. + y**2. + z**2.
-    ) < R_dis:  # check if axion star has reached the disuption radius
+    ) < R_dis:  # check if axion clump has reached the disuption radius
         flag = 1
-    elif x * vx + y * vy + z * vz > 0:  # check if axion star is outbound
+    elif x * vx + y * vy + z * vz > 0:  # check if axion clump is outbound
         flag = 2
 
-# write results of inital calculation to file, and generate axion
-# star as collection of particles
-print("Calculation of axion star as point particle finished.")
+# write results of initial calculation to file, and generate axion clump as collection of particles
+print("Calculation of axion clump as point particle finished.")
 if flag == 1:
-    print("Your axion made it to the disruption radius")
+    print("Your clump made it to the disruption radius")
     print("That took {:3E} years".format(t[-1] / 3.154e7))
     print("writing parameters and orbit to file")
     write_general_info()
-    write_pointParticle_orbit_zarr(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t)
-    print("generating axion star as {} particles".format(int(Nparticles)))
-    pAS_x, pAS_y, pAS_z, pAS_vx, pAS_vy, pAS_vz = mk_axstar(
-        AS_x[-1], AS_y[-1], AS_z[-1], AS_vx[-1], AS_vy[-1], AS_vz[-1],
+    if out_format_switch == 1:
+      write_pointParticle_orbit(AC_x, AC_y, AC_z, AC_vx, AC_vy, AC_vz, t)
+    elif out_format_switch == 2:
+      write_pointParticle_orbit_zarr(AC_x, AC_y, AC_z, AC_vx, AC_vy, AC_vz, t)
+    print("generating axion clump as {} particles".format(int(Nparticles)))
+    pAC_x, pAC_y, pAC_z, pAC_vx, pAC_vy, pAC_vz = mk_axclump(
+        AC_x[-1], AC_y[-1], AC_z[-1], AC_vx[-1], AC_vy[-1], AC_vz[-1],
         Nparticles)
 elif flag == 2:
-    print("Your axion star never came close enough to the neutron star")
+    print("Your axion clump never came close enough to the neutron star")
     print("writing parameters and orbit to file")
-    write_pointParticle_orbit_zarr(AS_x, AS_y, AS_z, AS_vx, AS_vy, AS_vz, t)
+    write_general_info()
+    if out_format_switch == 1:
+      write_pointParticle_orbit(AC_x, AC_y, AC_z, AC_vx, AC_vy, AC_vz, t)
+    elif out_format_switch == 2:
+      write_pointParticle_orbit_zarr(AC_x, AC_y, AC_z, AC_vx, AC_vy, AC_vz, t)
     print("aborting program...")
     sys.exit()
 
-# log file
+# create file structure for particle output
+if out_format_switch == 1:
+  os.mkdir(fpath_out + '/orbits')
+  fout_orbit_names = [
+      fpath_out + '/orbits/p_' + str(int(i)) + '.txt' for i in range(Nparticles)
+  ]
+  for i in range(Nparticles):
+      fo = open(fout_orbit_names[i], 'w')
+      fo.write('# t[s]  x[km]  y[km]  z[km]  vx[km]  vy[km]  vz[km]\n')
+      fo.close()
+elif out_format_switch == 2:
+  out_zarr = zarr.open(fpath_out + '/orbits.zarr')
+  compressor = LZ4()
+  #compressor = Blosc(cname='lz4')
+  for i in range(Nparticles):
+      out_zarr.array(str(i),
+                     np.empty((7, 0)),
+                     chunks=((7, 25000)),
+                     compressor=compressor)
 
-# original_stdout = sys.stdout # Save a reference to the original standard output
 
-# logfile = open(fpath_out + '/log.txt', 'w')
-# sys.stdout = logfile # Change the standard output to the file we created.
-
-# output zarr group:
-out_zarr = zarr.open(fpath_out + '/orbits.zarr')
-compressor = LZ4()
-#compressor = Blosc(cname='lz4')
-for i in range(Nparticles):
-    out_zarr.array(str(i),
-                   np.empty((7, 0)),
-                   chunks=((7, 25000)),
-                   compressor=compressor)
-
-# run the particles until all (except at most 5) are outbound and outside
-# Rcut set in find_inds_active
-t = np.full(pAS_x.shape, t[-1])
-inds_active = find_inds_active(pAS_x, pAS_y, pAS_z, pAS_vx, pAS_vy, pAS_vz)
+# reset the clock
+t = [0.]
+# run the particles until all (except at most 5) are outbound and outside Rcut set in find_inds_active
+t = np.full(pAC_x.shape, t[-1])
+inds_active = find_inds_active(pAC_x, pAC_y, pAC_z, pAC_vx, pAC_vy, pAC_vz)
 while len(inds_active) > 5:
     x_list, y_list, z_list, vx_list, vy_list, vz_list, t_list = run_particles_nsteps(
-        pAS_x[inds_active], pAS_y[inds_active], pAS_z[inds_active],
-        pAS_vx[inds_active], pAS_vy[inds_active], pAS_vz[inds_active],
+        pAC_x[inds_active], pAC_y[inds_active], pAC_z[inds_active],
+        pAC_vx[inds_active], pAC_vy[inds_active], pAC_vz[inds_active],
         t[inds_active])
-    write_orbits_to_disk(x_list, y_list, z_list, vx_list, vy_list, vz_list,
+    if out_format_switch == 1:
+      write_orbits_to_disk(x_list, y_list, z_list, vx_list, vy_list, vz_list,
+                         t_list, inds_active)
+    elif out_format_switch == 2:
+      write_orbits_to_disk_zarr(x_list, y_list, z_list, vx_list, vy_list, vz_list,
                          t_list, inds_active)
     # prepare next step
-    pAS_x[inds_active], pAS_y[inds_active], pAS_z[inds_active], pAS_vx[
-        inds_active], pAS_vy[inds_active], pAS_vz[inds_active], t[
+    pAC_x[inds_active], pAC_y[inds_active], pAC_z[inds_active], pAC_vx[
+        inds_active], pAC_vy[inds_active], pAC_vz[inds_active], t[
             inds_active] = x_list[-1], y_list[-1], z_list[-1], vx_list[
                 -1], vy_list[-1], vz_list[-1], t_list[-1]
-    inds_active = find_inds_active(pAS_x, pAS_y, pAS_z, pAS_vx, pAS_vy, pAS_vz)
-
-#logfile.close()
-# sys.stdout = original_stdout # Reset the standard output to its
+    inds_active = find_inds_active(pAC_x, pAC_y, pAC_z, pAC_vx, pAC_vy, pAC_vz)
