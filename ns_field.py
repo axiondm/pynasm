@@ -16,7 +16,7 @@ class ns:
             axis=np.array((0, 0, 1)),
             radius=1e4,  #meters
             dipole_moment=1e30 * np.array((1, 0, 1)),
-            quad_moment=1e34 * np.array([[0, 0, 1], [0, 1, 0]]),
+            quad_moment=1 * np.array([[0, 0, 1], [0, 1, 0]]),
             ns_day=1  #seconds
     ):
 
@@ -28,6 +28,14 @@ class ns:
         assert np.dot(quad_moment[0], quad_moment[1]) == 0
         quad_moment[1] = quad_moment[1] / norm(quad_moment[1])
         self.ns_day = ns_day
+
+    def rotated_dmoment(self, time):
+        # first compute the current moments
+        rot_matrix = rotation_matrix(self.axis, 2 * np.pi * time /
+                self.ns_day).T
+        # rotate the dipole moment 
+        dmoment = np.dot(rot_matrix, self.dipole_moment)
+        return dmoment 
 
     def mag_field(self, time, pos):
         """
@@ -49,15 +57,34 @@ class ns:
         # and quadrupole moment for every position
         if rot_matrix.ndim == 3:
             assert len(time) == len(pos)
-        elif rot_matrix.ndim == 2:
+        elif rot_matrix.ndim == 2 and len(pos.flat) > 3:
             dmoment = np.tile(dmoment, (len(pos), 1))
             qmoment = np.array([np.tile(qmoment[0], (len(pos), 1)),
                                 np.tile(qmoment[1], (len(pos), 1))])
+        else:
+            assert len(pos.flat) == 3 
+            dmoment = np.tile(dmoment, (1, 1))
+            qmoment = np.array([np.tile(qmoment[0], (1, 1)),
+                                np.tile(qmoment[1], (1, 1))])
+ 
         # next compute field from dipole moment
         B_dip = dipole(dmoment, pos)
         # and the quadrupole moment
         B_quad = quadrupole(qmoment, pos)
         return B_dip + B_quad
+
+    def wp(self, time, pos):
+        dpole = self.rotated_dmoment(time)
+        z_hat = dpole / norm(dpole)
+        B_field = self.mag_field(time, pos)
+        B_z = abs(B_field.dot(z_hat))
+
+        wp = 1.5e11 * np.sqrt(B_z / (1e14 * self.ns_day))
+
+        return wp
+
+
+
 
 def dipole(dmoment, pos, dip_location=np.array([0., 0., 0.])):
     if len(pos.shape) == 1:

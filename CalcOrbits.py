@@ -1,14 +1,14 @@
 from __future__ import division
 
+import os
+import random
+import string
 import sys
 import time
-import os
-import string
-import random
+
+import numpy as np
 import zarr
 from numcodecs import LZ4, Blosc
-import numpy as np
-
 
 # ----------------------------------------------------
 # enter parameters
@@ -16,21 +16,21 @@ import numpy as np
 #        Distances [km]
 #        Time      [s]
 
-Nparticles = int(1e4)    # number of particles in axion star
+Nparticles = int(1e4)  # number of particles in axion star
 
 # inital conditions for axion structure
-AS_mass = 1e-13    # mass [M_sol]
-AS_radius = 8e2    # radius [km]
-AS_r0 = np.array([1e12, 6e3, 0.])    # inital position [km]
-AS_v0 = np.array([-300., 0., 0.])    # inital velocity [km/s]
+AS_mass = 1e-13  # mass [M_sol]
+AS_radius = 8e2  # radius [km]
+AS_r0 = np.array([1e12, 6e3, 0.])  # inital position [km]
+AS_v0 = np.array([-300., 0., 0.])  # inital velocity [km/s]
 
 # neutron star parameter
-NS_mass = 1.4    # mass [M_sol]
-NS_radius = 10.    # radius [km]
+NS_mass = 1.4  # mass [M_sol]
+NS_radius = 10.  # radius [km]
 
 # ----------------------------------------------------
 # constants
-G_N = 1.325e11    # Newton constant in km^3/Msol/s^2
+G_N = 1.325e11  # Newton constant in km^3/Msol/s^2
 
 # compute gravitational parameter
 mu = NS_mass * G_N
@@ -38,15 +38,15 @@ mu = NS_mass * G_N
 AS_sigmav = np.sqrt(G_N * AS_mass / AS_radius)
 # AS_sigmav = 1.151086e-3
 # calculate Roche disruption radius
-R_dis = AS_radius * (2. * NS_mass / AS_mass)**(1. / 3.)    # [km]
+R_dis = AS_radius * (2. * NS_mass / AS_mass)**(1. / 3.)  # [km]
 
 # some parameters for the code and the output
 # radius [km] at which partices leaving the neutron star are dropped
 # from the calculation
 Rdrop = 1e4
-Rsave = 1e3    # radius [km] within in which orbits are written to file
-nwrite = 100    # number of steps in output to skip when writing to file
-mem_size = 1.    # target size of memory [GB] the calculation fills
+Rsave = 1e3  # radius [km] within in which orbits are written to file
+nwrite = 100  # number of steps in output to skip when writing to file
+mem_size = 1.  # target size of memory [GB] the calculation fills
 
 # ----------------------------------------------------
 # functions
@@ -56,30 +56,44 @@ def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
     return ''.join(random.choice(chars) for _ in range(size))
 
 
+###################################
+
+
 def update_r_v(rx, ry, rz, vx, vy, vz, mu, NSR, rprecision=1e-3, dtmax=1e25):
     """ returns updated r and v and dt for particles """
-    r = np.sqrt(rx**2. + ry**2. + rz**2.)
-    v = np.sqrt(vx**2. + vy**2. + vz**2.)
+    r = np.sqrt(rx**2 + ry**2 + rz**2)
+    v = np.sqrt(vx**2 + vy**2 + vz**2)
     dt = r / v * rprecision
     if np.isscalar(dt):
         dt = np.min([dt, dtmax])
     else:
-        np.minimum(dt, np.full(dt.shape, dtmax))
+        dt = np.minimum(dt, dtmax * np.ones(dt.shape))
     # calculate the acceleration
-    r[np.where(
-        r < NSR
-    )] = NSR    # soften acceleration inside the neutron star assuming that it has uniform density
-    ax = -mu * rx / r**3.
-    ay = -mu * ry / r**3.
-    az = -mu * rz / r**3.
+    #r[np.where(r<NSR)]=NSR # soften acceleration inside the neutron star assuming that it has uniform density
+    ax = -mu * rx / r**3
+    ay = -mu * ry / r**3
+    az = -mu * rz / r**3
     # update velocity and position
-    out_rx = rx + vx * dt + .5 * ax * dt**2.
-    out_ry = ry + vy * dt + .5 * ay * dt**2.
-    out_rz = rz + vz * dt + .5 * az * dt**2.
+    out_rx = rx + vx * dt + 0.5 * ax * dt**2
+    out_ry = ry + vy * dt + 0.5 * ay * dt**2
+    out_rz = rz + vz * dt + 0.5 * az * dt**2
     out_vx = vx + ax * dt
     out_vy = vy + ay * dt
     out_vz = vz + az * dt
+    # remove particles inside NSR:
+    rout2 = out_rx**2 + out_ry**2 + out_rz**2
+    if np.isscalar(dt):
+        if rout2 < NSR**2:
+            out_rx = out_ry = out_rz = 1e10 * Rdrop
+            out_vx = out_vy = out_vz = 1e10
+    else:
+        inds = np.where(rout2 < NSR**2)
+        out_rx[inds] = out_ry[inds] = out_rz[inds] = 1e3 * np.sqrt(3) * Rdrop
+        out_vx[inds] = out_vy[inds] = out_vz[inds] = 1e5
     return out_rx, out_ry, out_rz, out_vx, out_vy, out_vz, dt
+
+
+###########################
 
 
 def mk_axstar(x0, y0, z0, vx0, vy0, vz0, Np):
@@ -107,7 +121,7 @@ def mk_axstar(x0, y0, z0, vx0, vy0, vz0, Np):
     r_vec = np.linspace(0, 3. * AS_radius, int(3e6))
     r_pdf = r_vec**2 * np.exp(
         -r_vec**2. / (2. * (AS_radius / 2.5)**2.)
-    )    # includes fudge factor to define AS_radius as R_90
+    )  # includes fudge factor to define AS_radius as R_90
     x_cT = np.random.rand(Np) * 2. - 1.
     x_sT = np.sin(np.arccos(x_cT))
     x_phi = np.random.rand(Np) * 2. * np.pi
@@ -231,13 +245,11 @@ def write_orbits_to_disk(x,
     for i, ind in enumerate(inds_active):
         mask = x[i]**2 + y[i]**2 + z[i]**2 < Rcut**2
 
-        out_zarr[str(ind)].append([t[i][mask],
-                                 x[i][mask],
-                                 y[i][mask],
-                                 z[i][mask],
-                                 vx[i][mask],
-                                 vy[i][mask],
-                                 vz[i][mask]], axis=1)
+        out_zarr[str(ind)].append([
+            t[i][mask], x[i][mask], y[i][mask], z[i][mask], vx[i][mask],
+            vy[i][mask], vz[i][mask]
+        ],
+                                  axis=1)
     print('finished writing data after {} seconds'.format(time.time() -
                                                           startTfun))
 
@@ -280,9 +292,9 @@ while flag == 0:
     t = np.append(t, t[-1] + dt)
     if np.sqrt(
             x**2. + y**2. + z**2.
-    ) < R_dis:    # check if axion star has reached the disuption radius
+    ) < R_dis:  # check if axion star has reached the disuption radius
         flag = 1
-    elif x * vx + y * vy + z * vz > 0:    # check if axion star is outbound
+    elif x * vx + y * vy + z * vz > 0:  # check if axion star is outbound
         flag = 2
 
 # write results of inital calculation to file, and generate axion
@@ -317,7 +329,10 @@ out_zarr = zarr.open(fpath_out + '/orbits.zarr')
 compressor = LZ4()
 #compressor = Blosc(cname='lz4')
 for i in range(Nparticles):
-    out_zarr.array(str(i), np.empty((7, 0)), chunks=((7, 25000)), compressor=compressor)
+    out_zarr.array(str(i),
+                   np.empty((7, 0)),
+                   chunks=((7, 25000)),
+                   compressor=compressor)
 
 # run the particles until all (except at most 5) are outbound and outside
 # Rcut set in find_inds_active

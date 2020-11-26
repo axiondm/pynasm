@@ -1,28 +1,52 @@
 import numpy as np
 import scipy as sp
 from scipy import constants as c
+from scipy.interpolate import interp1d
+from scipy.optimize import root_scalar
 import zarr
 from matplotlib import pyplot as plt
 from multiprocessing import Pool
 
 from .ns_field import ns, norm
 
+def find_conversion_radius(orbit_interpolator, ns, axion_mass, time_bracket):
+    """
+    We expect orbit_interpolator to be the output of integrate_orbits(),
+    a special function that takes a single time or an array of times and spits
+    out x,y,z,px,py,pz for each time.
 
-def integrate_single_orbit(orbit, my_ns):
-    """orbit should ba array-like with orbit[0] time, orbit[1:3] x, y, and z,
-    and orbit[4:6] px, py, and pz. ns should be a ns object, imported from
-    the ns_field module, representing the neutron star in question."""
+    ns should be a neutron star object. Axion mass should be in eV.
+    This function find the place where a axion trajectory encounters the
+    conversion surface in the neutron star.
+    """
 
-    H = my_ns.mag_field(orbit[0], orbit[1:4].T)
+    axion_frequency = axion_mass / c.physical_constants['Planck constant in eV/Hz'][0]
 
-    return H
+    def to_minimize(t):
+        wp = ns.wp(t, orbit_interpolator(t)[:3])
+        return axion_frequency - wp
+
+    solution = root_scalar(to_minimize, bracket=time_bracket)
+    if type(solution.root) is float:
+        return solution.root
+    conversion_points = [orbit_interpolator(i) for i in solution.root]
+    return conversion_points
+    
+
+
+def interpolated_orbit(orbit):
+    def interpolator(t):
+        interps = [interp1d(orbit[0], i, fill_value=0, bounds_error=False) for i in orbit[1:]]
+        return np.array([i(t) for i in interps])
+    return interpolator
 
 
 def integrate_orbits(path, ns_axis=np.array((0.1, 0, 1)),
                            ns_radius=None, # meters
                            ns_dmoment=1e30 * np.array((1, 0, 1)),
                            ns_qmoment=1e34 * np.array([[0, 0, 1], [0, 1, 0]]),
-                           ns_day=1 # seconds
+                           ns_day=1, # seconds
+                           axion_mass=1e-6 #eV
                            ):
 
     results = []
@@ -34,13 +58,14 @@ def integrate_orbits(path, ns_axis=np.array((0.1, 0, 1)),
     my_ns = ns(ns_axis, ns_radius, ns_dmoment, ns_qmoment, ns_day)
     orbits = zarr.load(path + "/orbits.zarr")
 
-    p = Pool()
-    results = p.map(lambda orbit: integrate_single_orbit(orbit, my_ns), orbits.values())
+    # p = Pool()
+    # results = p.map(lambda orbit: integrate_single_orbit(orbit, my_ns), orbits.values())
 
-
-#     for orbit in orbits.values():
-#         result = integrate_single_orbit(orbit, my_ns)
-#         results.append(result)
+    for orbit in orbits.values():
+        ointerp = interpolated_orbit(orbit)
+        tbracket = [orbit[0][0], orbit[0][-1]]
+        result = find_conversion_radius(ointerp, my_ns, axion_mass, tbracket)
+        results.append(result)
 
     return results
 
