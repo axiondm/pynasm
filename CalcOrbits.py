@@ -573,7 +573,7 @@ elif flag == 2:
 if out_format_switch == 1:
   os.mkdir(fpath_out + '/orbits')
   fout_orbit_names = [
-      fpath_out + '/orbits/p_' + str(int(i)) + '.txt' for i in range(Nparticles)
+      fpath_out + '/orbits/p_' + f'{i:06}' + '.txt' for i in range(Nparticles)
   ]
   for i in range(Nparticles):
       fo = open(fout_orbit_names[i], 'w')

@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import scipy as sp
 from scipy import constants as c
