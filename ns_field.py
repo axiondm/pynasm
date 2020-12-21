@@ -74,11 +74,17 @@ class ns:
         return B_dip + B_quad
 
     def wp(self, time, pos):
+        if type(time) is int or type(time) is float:
+            vector = False
+        else:
+            vector = True
         dpole = self.rotated_dmoment(time)
-        z_hat = dpole / norm(dpole)
+        z_hat = (dpole.T / norm(dpole)).T
         B_field = self.mag_field(time, pos)
-        B_z = abs(B_field.dot(z_hat))
-
+        if vector:
+            B_z = abs(np.einsum('ij,ij->i', B_field, z_hat))
+        else: 
+            B_z = abs(B_field.dot(z_hat))
         wp = 1.5e11 * np.sqrt(B_z / (1e14 * self.ns_day))
 
         return wp
